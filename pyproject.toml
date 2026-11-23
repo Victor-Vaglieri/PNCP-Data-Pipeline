@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pncp-pipeline"
-version = "0.2.0"
+version = "0.3.0"
 description = "Pipeline de engenharia de dados sobre contratações públicas (PNCP)"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,9 +12,12 @@ dependencies = [
     "tenacity>=8.2",
     "python-dotenv>=1.0",
     "psycopg[binary]>=3.2",
+    "pandas>=2.2",
+    "pyarrow>=17.0",
 ]
 
 [project.optional-dependencies]
+spark = ["pyspark>=3.5,<4.0"]
 dev = ["pytest>=8", "respx>=0.21", "ruff>=0.5"]
 
 [tool.setuptools.packages.find]

@@ -17,6 +17,8 @@ class Settings:
     retry_wait_initial_s: float = 1.0
     user_agent: str = "pncp-pipeline-portfolio/0.1"
     raw_data_dir: Path = Path("data/raw")
+    silver_data_dir: Path = Path("data/processed")
+    gold_data_dir: Path = Path("data/gold")
     database_url: str = "postgresql://pncp:pncp@localhost:5432/pncp"
 
     def __post_init__(self) -> None:
@@ -39,5 +41,7 @@ class Settings:
             max_retries=int(env.get("PNCP_MAX_RETRIES", defaults.max_retries)),
             user_agent=env.get("PNCP_USER_AGENT", defaults.user_agent),
             raw_data_dir=Path(env.get("RAW_DATA_DIR", str(defaults.raw_data_dir))),
+            silver_data_dir=Path(env.get("SILVER_DATA_DIR", str(defaults.silver_data_dir))),
+            gold_data_dir=Path(env.get("GOLD_DATA_DIR", str(defaults.gold_data_dir))),
             database_url=env.get("DATABASE_URL", defaults.database_url),
         )

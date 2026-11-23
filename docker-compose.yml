@@ -17,5 +17,22 @@ services:
       timeout: 5s
       retries: 10
 
+  spark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pncp-spark
+    profiles: ["spark"]
+    environment:
+      RAW_DATA_DIR: /app/data/raw
+      SILVER_DATA_DIR: /app/data/processed
+      GOLD_DATA_DIR: /app/data/gold
+      SPARK_LOCAL_IP: 127.0.0.1
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./tests:/app/tests
+    command: ["python", "-m", "pncp_pipeline.transformations", "spark"]
+
 volumes:
   postgres_data:

@@ -14,7 +14,7 @@ Acompanhar gastos e licitações públicas exige lidar com JSONs aninhados, pagi
 
 1. **Etapa 1 (Ingestão Bronze e Resiliência) - CONCLUÍDA:** Cliente HTTP com `httpx` e `tenacity` (timeout, retry com backoff em `429`/`5xx`/rede e falha imediata em `4xx`), paginação completa respeitando o contrato OpenAPI do PNCP (`tamanhoPagina` 10–50 e `HTTP 204`), escrita atômica em JSON com envelope de metadados, CLI e suíte unitária com `respx`.
 2. **Etapa 2 (SQL e Modelagem Relacional) - CONCLUÍDA:** PostgreSQL 16 via Docker Compose, modelagem dimensional (`dim_orgao`, `dim_municipio`, `dim_modalidade`, `fact_contratacao`, `stg_contratacao_snapshot`, `pipeline_runs`), loader idempotente com `ON CONFLICT DO UPDATE` e guarda monotônica por `data_atualizacao`, documentação em `docs/modelagem.md` e consultas analíticas com CTEs, `JOIN` e funções de janela (`ROW_NUMBER`, `DENSE_RANK`, `LAG`, `SUM() OVER`).
-3. **Etapa 3 (Transformação Pandas e PySpark / Parquet) - PLANEJADA:** Baseline em Pandas, pipeline PySpark com `StructType` explícito, achatamento dos objetos aninhados, deduplicação por `data_atualizacao`, quarentena de inválidos (`rejected/`) e gravação em Parquet particionado com demonstração de *partition pruning*.
+3. **Etapa 3 (Transformação Pandas e PySpark / Parquet) - CONCLUÍDA:** Baseline em Pandas (`pandas_baseline.py`) e pipeline PySpark em container Linux (`spark_jobs.py` com `StructType` explícito), quarentena de registros inválidos (`rejected/`), deduplicação por janela, paridade validada entre Pandas e Spark, e gravação em Parquet particionado por `pub_year`/`pub_month`/`uf_sigla` com demonstração de *partition pruning* (`inspect`).
 4. **Etapa 4 (Orquestração com Apache Airflow) - PLANEJADA:** DAG diária separando ingestão (dynamic task mapping por modalidade), transformação, carga e checks de qualidade, usando `logical_date`, retries e timeouts sem lógica de negócio acoplada na DAG.
 5. **Etapa 5 (Qualidade, Observabilidade e Operação) - PLANEJADA:** Testes de integração (Postgres + Spark), validações automatizadas de contagem/unicidade/nulos, logging estruturado, guia de reprocessamento idempotente e CI no GitHub Actions.
 6. **Etapa 6 (Evolução — Delta Lake e Databricks) - PLANEJADA:** Migração do Silver para Delta Lake local (`MERGE` e *time travel*), processamento Gold em notebook no Databricks Free Edition via Volumes e enriquecimento opcional com dados do IBGE (população por `codigoIbge`) e BCB (PTAX/SGS).
@@ -22,8 +22,8 @@ Acompanhar gastos e licitações públicas exige lidar com JSONs aninhados, pagi
 ## 3. Tecnologias e Ferramentas (Stack)
 
 * **Linguagem Core (Python 3.12):** Cliente HTTP (`httpx`), resiliência (`tenacity`), configuração por ambiente (`python-dotenv`), driver PostgreSQL (`psycopg`), testes (`pytest` + `respx`) e lint (`ruff`).
-* **Processamento Distribuído (PySpark + Pandas — Etapa 3+):** Baseline em Pandas e transformação escalável em PySpark rodando em container Linux (evitando limitações de `winutils` no Windows).
-* **Armazenamento Analítico (Parquet / Delta Lake — Etapas 3 e 6):** Formato colunar particionado para leitura seletiva e transações ACID via `_delta_log/`.
+* **Processamento Distribuído (PySpark 3.5 + Pandas — Etapa 3):** Baseline em Pandas e pipeline PySpark rodando em container Linux (`Dockerfile`) com schema explícito (`StructType`), sem depender de `winutils.exe` no Windows.
+* **Armazenamento Analítico (Parquet / Delta Lake — Etapas 3 e 6):** Formato colunar particionado (`Snappy`) com *partition pruning* na leitura e evolução futura para transações ACID via `_delta_log/`.
 * **Banco Relacional (PostgreSQL 16 — Etapa 2):** Persistência do modelo dimensional, snapshots de staging e tabela de controle `pipeline_runs`.
 * **Orquestração e Infraestrutura (Airflow + Docker Compose — Etapas 2 e 4):** Execução local reproduzível sem dependência de serviços em nuvem pagos.
 
@@ -38,21 +38,29 @@ proj/
 │       │   ├── client.py            # Cliente HTTP, retry, paginação e validação do envelope
 │       │   ├── bronze_writer.py     # Escrita atômica e envelope de metadados Bronze
 │       │   └── __main__.py          # CLI da ingestão (python -m pncp_pipeline.ingestion)
-│       └── database/
-│           ├── schema.sql           # DDL do modelo dimensional, staging e pipeline_runs
-│           ├── loader.py            # Carga idempotente Bronze -> PostgreSQL
-│           └── __main__.py          # CLI do banco (init-db, load, query)
+│       ├── database/
+│       │   ├── schema.sql           # DDL do modelo dimensional, staging e pipeline_runs
+│       │   ├── loader.py            # Carga idempotente Bronze -> PostgreSQL
+│       │   └── __main__.py          # CLI do banco (init-db, load, query)
+│       └── transformations/
+│           ├── pandas_baseline.py   # Baseline Silver/Gold em Pandas + PyArrow Parquet
+│           ├── spark_jobs.py        # Pipeline PySpark com StructType, quarentena e pruning
+│           └── __main__.py          # CLI de transformações (pandas, spark, inspect)
 ├── sql/                             # Consultas analíticas (JOIN, CTE, ROW_NUMBER, DENSE_RANK, LAG)
 ├── docs/
 │   └── modelagem.md                 # Decisões de granularidade, tipos e idempotência
 ├── tests/
-│   └── unit/
-│       ├── test_bronze_writer.py    # Gravação Bronze, HTTP 204 e atomicidade em falha
-│       ├── test_cli.py              # Validação de datas e flags da CLI
-│       ├── test_client.py           # Mocks HTTP (200, 204, 400, 429, 5xx, timeout, paginação)
-│       ├── test_config.py           # Overrides de ambiente e limites do PNCP
-│       └── test_database_loader.py  # Mapeamento Bronze->relacional e deduplicação
-├── docker-compose.yml               # Serviço PostgreSQL 16 para execução local
+│   ├── unit/
+│   │   ├── test_bronze_writer.py    # Gravação Bronze, HTTP 204 e atomicidade em falha
+│   │   ├── test_cli.py              # Validação de datas e flags da CLI
+│   │   ├── test_client.py           # Mocks HTTP (200, 204, 400, 429, 5xx, timeout, paginação)
+│   │   ├── test_config.py           # Overrides de ambiente e limites do PNCP
+│   │   ├── test_database_loader.py  # Mapeamento Bronze->relacional e deduplicação
+│   │   └── test_pandas_baseline.py  # Regras de qualidade, quarentena e Parquet em Pandas
+│   └── integration/
+│       └── test_spark_pipeline.py   # Paridade Pandas vs PySpark e PartitionFilters Parquet
+├── Dockerfile                       # Imagem Linux com OpenJDK 17 + PySpark para o container spark
+├── docker-compose.yml               # Serviços PostgreSQL 16 e Spark local[*]
 ├── data/                            # Dados locais gerados (ignorado pelo Git)
 │   └── raw/                         # Camada Bronze particionada por endpoint/modalidade/período
 ├── .env.example                     # Modelo de variáveis de ambiente sem segredos
@@ -88,7 +96,7 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
 * `PNCP_REQUEST_TIMEOUT_S`: Timeout HTTP em segundos (padrão: `60`).
 * `PNCP_MAX_RETRIES`: Máximo de tentativas em erros transitórios (padrão: `5`).
 * `PNCP_USER_AGENT`: Identificação enviada no header `User-Agent`.
-* `RAW_DATA_DIR`: Diretório raiz da camada Bronze (padrão: `data/raw`).
+* `RAW_DATA_DIR`, `SILVER_DATA_DIR`, `GOLD_DATA_DIR`: Diretórios locais das camadas Bronze, Silver e Gold (`data/raw`, `data/processed`, `data/gold`).
 * `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`: Credenciais e porta do container PostgreSQL no `docker-compose.yml`.
 * `DATABASE_URL`: String de conexão usada pelo loader e consultas (padrão: `postgresql://pncp:pncp@localhost:5432/pncp`).
 
@@ -117,10 +125,22 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
     python -m pncp_pipeline.database query sql/03_ranking_orgaos_e_variacao.sql
     ```
 
-4. **Rodar lint e testes unitários:**
+4. **Executar transformações Bronze → Silver → Gold (Parquet) e inspecionar *partition pruning*:**
+    ```powershell
+    # Baseline Pandas local (Windows/Linux)
+    python -m pncp_pipeline.transformations pandas
+
+    # Pipeline PySpark em container Linux (recomendado no Windows)
+    docker-compose --profile spark build
+    docker-compose --profile spark run --rm spark python -m pncp_pipeline.transformations spark
+    docker-compose --profile spark run --rm spark python -m pncp_pipeline.transformations inspect --uf SP
+    ```
+
+5. **Rodar lint e testes (unitários locais e integração PySpark no container):**
     ```powershell
     ruff check src tests
     pytest -v
+    docker-compose --profile spark run --rm spark pytest -v
     ```
 
 *Validação real executada até a Etapa 2 (`2024-01-02`, modalidade `6`, `--max-pages 2`): 2 páginas coletadas, 100 registros gravados em `data/raw/...` e carregados em duas execuções idempotentes no PostgreSQL (`100` contratações únicas em `fact_contratacao`).*
@@ -134,5 +154,4 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
 
 ## 8. Próximos Passos (Backlog Futuro)
 
-* **Etapa 3 (PySpark + Parquet):** Implementar achatamento do JSON Bronze, regras de qualidade com quarentena e comparação de resultados entre Pandas e Spark.
 * **Etapa 4–6 (Airflow, Delta Lake e Databricks):** Orquestrar o fluxo completo em DAG, adotar `MERGE` no Delta Lake e publicar notebook Gold no Databricks Free Edition.
