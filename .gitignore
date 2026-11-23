@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Segredos
+.env
+
+# Dados locais (exemplos sintéticos pequenos ficam em tests/fixtures)
+data/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
