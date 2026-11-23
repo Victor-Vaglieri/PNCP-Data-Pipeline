@@ -1,0 +1,16 @@
+FROM apache/airflow:3.1.6-python3.12
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openjdk-17-jre-headless procps \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+USER airflow
+
+COPY --chown=airflow:root pyproject.toml ./
+COPY --chown=airflow:root src ./src
+
+RUN pip install --no-cache-dir "pyspark>=3.5,<4.0" "psycopg[binary]>=3.2" "pyarrow>=17.0" \
+    && pip install --no-cache-dir --no-deps -e .
