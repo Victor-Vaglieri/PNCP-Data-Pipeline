@@ -119,7 +119,8 @@ def deduplicate_contratacoes(records: Iterable[dict[str, Any]]) -> list[dict[str
 
 
 def read_bronze_records(raw_dir: Path) -> tuple[int, list[dict[str, Any]]]:
-    files = sorted(raw_dir.rglob("*.json"))
+    scan_dir = raw_dir / "source=pncp" if (raw_dir / "source=pncp").exists() else raw_dir
+    files = sorted(scan_dir.rglob("*.json"))
     extracted: list[dict[str, Any]] = []
     for path in files:
         content = json.loads(path.read_text(encoding="utf-8"))
@@ -360,3 +361,30 @@ def load_bronze_to_postgres(
         rows_deduplicated=len(deduped),
         duration_s=duration_s,
     )
+
+
+def load_ibge_to_postgres(raw_dir: Path, database_url: str) -> int:
+    """Carrega população municipal do IBGE (Bronze) para dim_municipio_populacao."""
+    from pncp_pipeline.ingestion.ibge_client import read_latest_ibge_population
+
+    rows = read_latest_ibge_population(raw_dir)
+    if not rows:
+        return 0
+
+    with psycopg.connect(database_url) as conn:
+        apply_schema(conn)
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO dim_municipio_populacao (codigo_ibge, municipio_nome, ano, populacao)
+                VALUES (%(codigo_ibge)s, %(municipio_nome)s, %(ano)s, %(populacao)s)
+                ON CONFLICT (codigo_ibge) DO UPDATE SET
+                    municipio_nome = EXCLUDED.municipio_nome,
+                    ano = EXCLUDED.ano,
+                    populacao = EXCLUDED.populacao,
+                    updated_at = NOW()
+                """,
+                rows,
+            )
+        conn.commit()
+    return len(rows)

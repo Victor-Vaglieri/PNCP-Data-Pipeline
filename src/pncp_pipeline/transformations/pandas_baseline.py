@@ -92,7 +92,8 @@ def _flatten_bronze_item(
 
 
 def read_bronze_dataframe(raw_dir: Path) -> tuple[int, pd.DataFrame]:
-    files = sorted(raw_dir.rglob("*.json"))
+    scan_dir = raw_dir / "source=pncp" if (raw_dir / "source=pncp").exists() else raw_dir
+    files = sorted(scan_dir.rglob("*.json"))
     rows: list[dict[str, Any]] = []
     for path in files:
         content = json.loads(path.read_text(encoding="utf-8"))

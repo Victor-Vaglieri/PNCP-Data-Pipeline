@@ -19,6 +19,8 @@ class Settings:
     raw_data_dir: Path = Path("data/raw")
     silver_data_dir: Path = Path("data/processed")
     gold_data_dir: Path = Path("data/gold")
+    delta_data_dir: Path = Path("data/delta")
+    ibge_base_url: str = "https://servicodados.ibge.gov.br/api/v3"
     database_url: str = "postgresql://pncp:pncp@localhost:5432/pncp"
     log_level: str = "INFO"
     log_format: str = "json"
@@ -45,6 +47,8 @@ class Settings:
             raw_data_dir=Path(env.get("RAW_DATA_DIR", str(defaults.raw_data_dir))),
             silver_data_dir=Path(env.get("SILVER_DATA_DIR", str(defaults.silver_data_dir))),
             gold_data_dir=Path(env.get("GOLD_DATA_DIR", str(defaults.gold_data_dir))),
+            delta_data_dir=Path(env.get("DELTA_DATA_DIR", str(defaults.delta_data_dir))),
+            ibge_base_url=env.get("IBGE_BASE_URL", defaults.ibge_base_url).rstrip("/"),
             database_url=env.get("DATABASE_URL", defaults.database_url),
             log_level=env.get("LOG_LEVEL", defaults.log_level),
             log_format=env.get("LOG_FORMAT", defaults.log_format),

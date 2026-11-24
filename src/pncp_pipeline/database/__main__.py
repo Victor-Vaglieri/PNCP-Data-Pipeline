@@ -9,7 +9,11 @@ from dotenv import load_dotenv
 
 from pncp_pipeline.common.logging import configure_logging
 from pncp_pipeline.config import Settings
-from pncp_pipeline.database.loader import apply_schema, load_bronze_to_postgres
+from pncp_pipeline.database.loader import (
+    apply_schema,
+    load_bronze_to_postgres,
+    load_ibge_to_postgres,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db", help="Aplica schema.sql no PostgreSQL.")
     sub.add_parser("load", help="Carrega arquivos Bronze para o PostgreSQL (idempotente).")
+    sub.add_parser(
+        "load-ibge", help="Carrega população municipal do IBGE para dim_municipio_populacao."
+    )
     query_cmd = sub.add_parser("query", help="Executa um arquivo SQL e imprime as linhas.")
     query_cmd.add_argument("sql_file", type=Path, help="Caminho para arquivo .sql")
     return parser
@@ -49,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
             summary.rows_deduplicated,
             summary.duration_s,
         )
+        return 0
+
+    if args.command == "load-ibge":
+        count = load_ibge_to_postgres(settings.raw_data_dir, settings.database_url)
+        log.info("ibge_loaded", extra={"municipalities": count})
         return 0
 
     sql_text = args.sql_file.read_text(encoding="utf-8")

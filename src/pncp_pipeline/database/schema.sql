@@ -20,6 +20,14 @@ CREATE TABLE IF NOT EXISTS dim_modalidade (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS dim_municipio_populacao (
+    codigo_ibge TEXT PRIMARY KEY,
+    municipio_nome TEXT NOT NULL,
+    ano INTEGER NOT NULL,
+    populacao BIGINT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS fact_contratacao (
     numero_controle_pncp TEXT PRIMARY KEY,
     orgao_cnpj TEXT NOT NULL REFERENCES dim_orgao(cnpj),

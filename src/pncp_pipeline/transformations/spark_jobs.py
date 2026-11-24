@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import io
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -80,15 +81,24 @@ BRONZE_ENVELOPE_SCHEMA = StructType(
 
 
 def create_spark_session(app_name: str = "pncp-pipeline") -> SparkSession:
-    return (
+    builder = (
         SparkSession.builder.appName(app_name)
         .master("local[*]")
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.jars.ivy", "/tmp/.ivy2")
         .config("spark.ui.enabled", "false")
-        .getOrCreate()
     )
+    if importlib.util.find_spec("delta") is not None:
+        from delta import configure_spark_with_delta_pip
+
+        builder = builder.config(
+            "spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension"
+        ).config(
+            "spark.sql.catalog.spark_catalog",
+            "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        )
+        return configure_spark_with_delta_pip(builder).getOrCreate()
+    return builder.getOrCreate()
 
 
 def _norm_str(col: F.Column, *, upper: bool = False) -> F.Column:
@@ -98,7 +108,8 @@ def _norm_str(col: F.Column, *, upper: bool = False) -> F.Column:
 
 
 def read_bronze_spark(spark: SparkSession, raw_dir: Path) -> tuple[int, DataFrame]:
-    files = sorted(raw_dir.rglob("*.json"))
+    scan_dir = raw_dir / "source=pncp" if (raw_dir / "source=pncp").exists() else raw_dir
+    files = sorted(scan_dir.rglob("*.json"))
     if not files:
         empty = spark.createDataFrame([], BRONZE_ENVELOPE_SCHEMA)
         return 0, empty

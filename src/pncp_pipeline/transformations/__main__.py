@@ -19,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("pandas", help="Executa baseline Pandas + Parquet.")
     sub.add_parser("spark", help="Executa pipeline PySpark + Parquet.")
+    sub.add_parser("delta", help="Executa pipeline PySpark + Delta Lake (MERGE ACID).")
+    sub.add_parser("delta-history", help="Exibe histórico de versões (Time Travel) do Delta.")
     inspect_cmd = sub.add_parser(
         "inspect", help="Inspeciona partições Parquet (e plano Spark quando disponível)."
     )
@@ -50,6 +52,48 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "delta":
+        from pncp_pipeline.transformations.delta_jobs import (
+            create_delta_spark_session,
+            run_delta_pipeline,
+        )
+
+        spark = create_delta_spark_session()
+        try:
+            summary = run_delta_pipeline(spark, settings.raw_data_dir, settings.delta_data_dir)
+        finally:
+            spark.stop()
+        log.info(
+            "delta_pipeline_concluido",
+            extra={
+                "files": summary.files_read,
+                "rows_in": summary.rows_in,
+                "rows_silver_batch": summary.rows_silver_batch,
+                "total_silver_delta": summary.total_silver_delta,
+                "gold_rows": summary.gold_rows,
+                "delta_version": summary.delta_version,
+            },
+        )
+        return 0
+
+    if args.command == "delta-history":
+        from pncp_pipeline.transformations.delta_jobs import (
+            create_delta_spark_session,
+            get_delta_history,
+        )
+
+        silver_delta = settings.delta_data_dir / "silver" / "contratacoes"
+        spark = create_delta_spark_session("pncp-delta-history")
+        try:
+            for item in get_delta_history(spark, silver_delta):
+                print(
+                    f"v{item['version']} | {item['timestamp']} | "
+                    f"{item['operation']} | {item['operationMetrics']}"
+                )
+        finally:
+            spark.stop()
+        return 0
+
     if args.command == "spark":
         from pncp_pipeline.transformations.spark_jobs import (
             create_spark_session,
@@ -72,6 +116,48 @@ def main(argv: list[str] | None = None) -> int:
             summary.rows_rejected,
             summary.gold_uf_rows,
         )
+        return 0
+
+    if args.command == "delta":
+        from pncp_pipeline.transformations.delta_jobs import (
+            create_delta_spark_session,
+            run_delta_pipeline,
+        )
+
+        spark = create_delta_spark_session()
+        try:
+            summary = run_delta_pipeline(spark, settings.raw_data_dir, settings.delta_data_dir)
+        finally:
+            spark.stop()
+        log.info(
+            "delta_pipeline_concluido",
+            extra={
+                "files": summary.files_read,
+                "rows_in": summary.rows_in,
+                "rows_silver_batch": summary.rows_silver_batch,
+                "total_silver_delta": summary.total_silver_delta,
+                "gold_rows": summary.gold_rows,
+                "delta_version": summary.delta_version,
+            },
+        )
+        return 0
+
+    if args.command == "delta-history":
+        from pncp_pipeline.transformations.delta_jobs import (
+            create_delta_spark_session,
+            get_delta_history,
+        )
+
+        silver_delta = settings.delta_data_dir / "silver" / "contratacoes"
+        spark = create_delta_spark_session("pncp-delta-history")
+        try:
+            for item in get_delta_history(spark, silver_delta):
+                print(
+                    f"v{item['version']} | {item['timestamp']} | "
+                    f"{item['operation']} | {item['operationMetrics']}"
+                )
+        finally:
+            spark.stop()
         return 0
 
     silver_contratacoes = settings.silver_data_dir / "contratacoes"

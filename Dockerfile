@@ -20,4 +20,6 @@ RUN useradd -u 50000 -g 0 -m -s /bin/bash airflow \
 
 USER 50000:0
 
+RUN python -c "from pncp_pipeline.transformations.delta_jobs import create_delta_spark_session; s = create_delta_spark_session('delta-warmup'); s.stop()"
+
 CMD ["python", "-m", "pncp_pipeline.transformations", "spark"]
