@@ -15,5 +15,9 @@ COPY src ./src
 
 RUN pip install --no-cache-dir -e ".[spark]"
 RUN pip install --no-cache-dir pytest respx ruff
+RUN useradd -u 50000 -g 0 -m -s /bin/bash airflow \
+    && chown -R 50000:0 /app
+
+USER 50000:0
 
 CMD ["python", "-m", "pncp_pipeline.transformations", "spark"]

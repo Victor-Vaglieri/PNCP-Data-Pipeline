@@ -20,6 +20,8 @@ class Settings:
     silver_data_dir: Path = Path("data/processed")
     gold_data_dir: Path = Path("data/gold")
     database_url: str = "postgresql://pncp:pncp@localhost:5432/pncp"
+    log_level: str = "INFO"
+    log_format: str = "json"
 
     def __post_init__(self) -> None:
         if not PNCP_MIN_PAGE_SIZE <= self.page_size <= PNCP_MAX_PAGE_SIZE:
@@ -44,4 +46,6 @@ class Settings:
             silver_data_dir=Path(env.get("SILVER_DATA_DIR", str(defaults.silver_data_dir))),
             gold_data_dir=Path(env.get("GOLD_DATA_DIR", str(defaults.gold_data_dir))),
             database_url=env.get("DATABASE_URL", defaults.database_url),
+            log_level=env.get("LOG_LEVEL", defaults.log_level),
+            log_format=env.get("LOG_FORMAT", defaults.log_format),
         )

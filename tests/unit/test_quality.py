@@ -48,19 +48,41 @@ def _write_dummy_silver(silver_dir: Path, rows: int = 3) -> None:
     pq.write_table(pa.Table.from_pandas(df, preserve_index=False), target / "part-0.parquet")
 
 
+def _write_dummy_gold(gold_dir: Path, total_rows: int) -> None:
+    target = gold_dir / "resumo_uf_mes"
+    target.mkdir(parents=True)
+    df = pd.DataFrame({"uf_sigla": ["SP"], "qtd_contratacoes": [total_rows]})
+    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), target / "part-0.parquet")
+
+
 def test_run_quality_checks_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_dummy_silver(tmp_path, rows=3)
+    silver_dir = tmp_path / "silver"
+    gold_dir = tmp_path / "gold"
+    _write_dummy_silver(silver_dir, rows=3)
+    _write_dummy_gold(gold_dir, total_rows=3)
     monkeypatch.setattr(
         "pncp_pipeline.common.quality.psycopg.connect",
-        lambda _url: _FakeConn([(3,), (0,), (0,)]),
+        lambda _url: _FakeConn([(3,), (0,), (0,), (0,)]),
     )
 
-    report = run_quality_checks(tmp_path, "postgresql://fake")
+    report = run_quality_checks(silver_dir, "postgresql://fake", gold_dir=gold_dir)
 
     assert report.silver_rows == 3
+    assert report.gold_rows == 3
     assert report.fact_rows == 3
     assert report.duplicate_keys == 0
+    assert report.null_required_fields == 0
     assert report.negative_values == 0
+
+
+def test_run_quality_checks_fails_on_gold_mismatch(tmp_path: Path) -> None:
+    silver_dir = tmp_path / "silver"
+    gold_dir = tmp_path / "gold"
+    _write_dummy_silver(silver_dir, rows=3)
+    _write_dummy_gold(gold_dir, total_rows=2)
+
+    with pytest.raises(ValueError, match="Inconsistência Silver"):
+        run_quality_checks(silver_dir, "postgresql://fake", gold_dir=gold_dir)
 
 
 def test_run_quality_checks_fails_on_duplicates(
@@ -69,10 +91,23 @@ def test_run_quality_checks_fails_on_duplicates(
     _write_dummy_silver(tmp_path, rows=2)
     monkeypatch.setattr(
         "pncp_pipeline.common.quality.psycopg.connect",
-        lambda _url: _FakeConn([(2,), (1,), (0,)]),
+        lambda _url: _FakeConn([(2,), (1,), (0,), (0,)]),
     )
 
     with pytest.raises(ValueError, match="duplicadas"):
+        run_quality_checks(tmp_path, "postgresql://fake")
+
+
+def test_run_quality_checks_fails_on_null_required_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_dummy_silver(tmp_path, rows=2)
+    monkeypatch.setattr(
+        "pncp_pipeline.common.quality.psycopg.connect",
+        lambda _url: _FakeConn([(2,), (0,), (1,), (0,)]),
+    )
+
+    with pytest.raises(ValueError, match="campo obrigatório nulo"):
         run_quality_checks(tmp_path, "postgresql://fake")
 
 

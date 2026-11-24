@@ -6,6 +6,7 @@ import logging
 import pyarrow.parquet as pq
 from dotenv import load_dotenv
 
+from pncp_pipeline.common.logging import configure_logging
 from pncp_pipeline.config import Settings
 from pncp_pipeline.transformations.pandas_baseline import run_pandas_pipeline
 
@@ -29,12 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
     args = build_parser().parse_args(argv)
     settings = Settings.from_env()
+    configure_logging(settings.log_level, settings.log_format)
     log = logging.getLogger(__name__)
 
     if args.command == "pandas":

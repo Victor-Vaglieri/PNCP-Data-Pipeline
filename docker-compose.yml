@@ -95,6 +95,8 @@ services:
     user: "50000:0"
     profiles: ["spark"]
     environment:
+      HOME: /tmp
+      JAVA_TOOL_OPTIONS: -Duser.home=/tmp
       RAW_DATA_DIR: /app/data/raw
       SILVER_DATA_DIR: /app/data/processed
       GOLD_DATA_DIR: /app/data/gold

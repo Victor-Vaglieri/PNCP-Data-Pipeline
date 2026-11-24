@@ -140,20 +140,27 @@ def pncp_contratacoes_pipeline() -> None:
         }
 
     @task
-    def data_quality_checks(_load_summary: dict[str, Any]) -> dict[str, int]:
+    def data_quality_checks(_load_summary: dict[str, Any]) -> dict[str, int | None]:
         settings = Settings.from_env()
-        report = run_quality_checks(settings.silver_data_dir, settings.database_url)
+        report = run_quality_checks(
+            settings.silver_data_dir,
+            settings.database_url,
+            gold_dir=settings.gold_data_dir,
+        )
         log.info(
-            "qa_passed silver_rows=%s fact_rows=%s duplicates=%s negatives=%s",
+            "qa_passed silver_rows=%s gold_rows=%s fact_rows=%s duplicates=%s negatives=%s",
             report.silver_rows,
+            report.gold_rows,
             report.fact_rows,
             report.duplicate_keys,
             report.negative_values,
         )
         return {
             "silver_rows": report.silver_rows,
+            "gold_rows": report.gold_rows,
             "fact_rows": report.fact_rows,
             "duplicate_keys": report.duplicate_keys,
+            "null_required_fields": report.null_required_fields,
             "negative_values": report.negative_values,
         }
 

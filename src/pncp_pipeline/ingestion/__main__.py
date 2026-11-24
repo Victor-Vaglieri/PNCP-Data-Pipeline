@@ -6,6 +6,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
+from pncp_pipeline.common.logging import configure_logging
 from pncp_pipeline.config import Settings
 from pncp_pipeline.ingestion.bronze_writer import ingest_contratacoes
 from pncp_pipeline.ingestion.client import PncpClient
@@ -54,15 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
     args = build_parser().parse_args(argv)
     if args.start > args.end:
         raise SystemExit(f"Data inicial ({args.start}) maior que data final ({args.end}).")
 
     settings = Settings.from_env()
+    configure_logging(settings.log_level, settings.log_format)
     with PncpClient(settings) as client:
         result = ingest_contratacoes(
             client=client,

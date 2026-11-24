@@ -85,6 +85,7 @@ def create_spark_session(app_name: str = "pncp-pipeline") -> SparkSession:
         .master("local[*]")
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.jars.ivy", "/tmp/.ivy2")
         .config("spark.ui.enabled", "false")
         .getOrCreate()
     )
