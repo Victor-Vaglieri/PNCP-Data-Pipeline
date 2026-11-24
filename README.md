@@ -17,13 +17,13 @@ Acompanhar gastos e licitações públicas exige lidar com JSONs aninhados, pagi
 3. **Etapa 3 (Transformação Pandas e PySpark / Parquet) - CONCLUÍDA:** Baseline em Pandas (`pandas_baseline.py`) e pipeline PySpark em container Linux (`spark_jobs.py` com `StructType` explícito), quarentena de registros inválidos (`rejected/`), deduplicação por janela, paridade validada entre Pandas e Spark, e gravação em Parquet particionado por `pub_year`/`pub_month`/`uf_sigla` com demonstração de *partition pruning* (`inspect`).
 4. **Etapa 4 (Orquestração com Apache Airflow) - CONCLUÍDA:** Apache Airflow 3.1.6 em Docker (`LocalExecutor`, `api-server`, `scheduler`, `dag-processor`), DAG `pncp_contratacoes_pipeline` usando `airflow.sdk`, Dynamic Task Mapping por modalidade (`[6, 8]`), retries com backoff exponencial, `execution_timeout`, passagem de janela por `data_interval_start`/`conf` e validações de qualidade em `common/quality.py`.
 5. **Etapa 5 (Qualidade, Observabilidade e Operação) - CONCLUÍDA:** Logging estruturado em JSON (`common/logging.py`), checks de qualidade entre Silver, Gold e PostgreSQL (`common/quality.py` com CLI), testes de integração contra PostgreSQL real e PySpark, guia operacional de reprocessamento (`docs/reprocessamento.md`) e CI no GitHub Actions (`.github/workflows/ci.yml`).
-6. **Etapa 6 (Evolução — Delta Lake e Databricks) - PLANEJADA:** Migração do Silver para Delta Lake local (`MERGE` e *time travel*), processamento Gold em notebook no Databricks Free Edition via Volumes e enriquecimento opcional com dados do IBGE (população por `codigoIbge`) e BCB (PTAX/SGS).
+6. **Etapa 6 (Evolução — Delta Lake, IBGE e Databricks) - CONCLUÍDA:** Camadas Silver e Gold em Delta Lake (`delta_jobs.py` com `MERGE` monotônico e *time travel* via `delta`/`delta-history`), enriquecimento municipal via API do IBGE (`ibge_client.py` + `dim_municipio_populacao` + `sql/04_gasto_per_capita_municipio.sql`), notebook pronto para Databricks Free Edition Serverless (`databricks/pncp_gold_delta.ipynb`) e arquitetura de referência em nuvem (`docs/databricks_e_cloud.md`).
 
 ## 3. Tecnologias e Ferramentas (Stack)
 
 * **Linguagem Core (Python 3.12):** Cliente HTTP (`httpx`), resiliência (`tenacity`), configuração por ambiente (`python-dotenv`), driver PostgreSQL (`psycopg`), testes (`pytest` + `respx`) e lint (`ruff`).
-* **Processamento Distribuído (PySpark 3.5 + Pandas — Etapa 3):** Baseline em Pandas e pipeline PySpark rodando em container Linux (`Dockerfile`) com schema explícito (`StructType`), sem depender de `winutils.exe` no Windows.
-* **Armazenamento Analítico (Parquet / Delta Lake — Etapas 3 e 6):** Formato colunar particionado (`Snappy`) com *partition pruning* na leitura e evolução futura para transações ACID via `_delta_log/`.
+* **Processamento Distribuído (PySpark 3.5 + Pandas + Delta Lake 3.3 — Etapas 3 e 6):** Baseline em Pandas e pipeline PySpark rodando em container Linux (`Dockerfile`) com schema explícito (`StructType`) e transações ACID via `delta-spark`.
+* **Armazenamento Analítico (Parquet / Delta Lake — Etapas 3 e 6):** Formato colunar particionado (`Snappy`) com *partition pruning* na leitura e `_delta_log/` para `MERGE` e *time travel*.
 * **Banco Relacional (PostgreSQL 16 — Etapa 2):** Persistência do modelo dimensional, snapshots de staging e tabela de controle `pipeline_runs`.
 * **Orquestração e Infraestrutura (Apache Airflow 3.1.6 + Docker Compose — Etapas 2 e 4):** `LocalExecutor`, Task SDK (`airflow.sdk`), Dynamic Task Mapping e execution API em containers locais sem nuvem paga.
 
@@ -31,6 +31,8 @@ Acompanhar gastos e licitações públicas exige lidar com JSONs aninhados, pagi
 
 ```text
 proj/
+├── databricks/
+│   └── pncp_gold_delta.ipynb        # Notebook Delta Silver/Gold para Databricks Free Edition
 ├── dags/
 │   └── pncp_contratacoes_pipeline.py # DAG Airflow 3 (TaskFlow + Dynamic Task Mapping)
 ├── src/
@@ -41,22 +43,25 @@ proj/
 │       │   └── quality.py           # Validações de contagem, nulidade, unicidade e consistência
 │       ├── ingestion/
 │       │   ├── client.py            # Cliente HTTP, retry, paginação e validação do envelope
+│       │   ├── ibge_client.py       # Coleta de população municipal (IBGE agregado 6579)
 │       │   ├── bronze_writer.py     # Escrita atômica e envelope de metadados Bronze
 │       │   └── __main__.py          # CLI da ingestão (python -m pncp_pipeline.ingestion)
 │       ├── database/
 │       │   ├── schema.sql           # DDL do modelo dimensional, staging e pipeline_runs
 │       │   ├── loader.py            # Carga idempotente Bronze -> PostgreSQL
-│       │   └── __main__.py          # CLI do banco (init-db, load, query)
+│       │   └── __main__.py          # CLI do banco (init-db, load, load-ibge, query)
 │       └── transformations/
 │           ├── pandas_baseline.py   # Baseline Silver/Gold em Pandas + PyArrow Parquet
 │           ├── spark_jobs.py        # Pipeline PySpark com StructType, quarentena e pruning
-│           └── __main__.py          # CLI de transformações (pandas, spark, inspect)
+│           ├── delta_jobs.py        # Silver/Gold em Delta Lake (MERGE e Time Travel)
+│           └── __main__.py          # CLI (pandas, spark, delta, delta-history, inspect)
 ├── scripts/
 │   └── postgres_init.sql            # Cria o banco 'airflow' na inicialização do Postgres
-├── sql/                             # Consultas analíticas (JOIN, CTE, ROW_NUMBER, DENSE_RANK, LAG)
+├── sql/                             # Consultas analíticas (JOIN, CTE, janelas, gasto per capita)
 ├── docs/
 │   ├── modelagem.md                 # Decisões de granularidade, tipos e idempotência
-│   └── reprocessamento.md           # Guia de backfill e reexecução idempotente
+│   ├── reprocessamento.md           # Guia de backfill e reexecução idempotente
+│   └── databricks_e_cloud.md        # Guia Databricks Free Edition e arquitetura Azure/GCP
 ├── tests/
 │   ├── unit/
 │   │   ├── test_bronze_writer.py    # Gravação Bronze, HTTP 204 e atomicidade em falha
@@ -64,10 +69,12 @@ proj/
 │   │   ├── test_client.py           # Mocks HTTP (200, 204, 400, 429, 5xx, timeout, paginação)
 │   │   ├── test_config.py           # Overrides de ambiente e limites do PNCP
 │   │   ├── test_database_loader.py  # Mapeamento Bronze->relacional e deduplicação
+│   │   ├── test_ibge_client.py      # Parsing de população IBGE e escrita Bronze atômica
 │   │   ├── test_logging.py          # Formato JSON estruturado e captura de exceções
 │   │   ├── test_pandas_baseline.py  # Regras de qualidade, quarentena e Parquet em Pandas
 │   │   └── test_quality.py          # Testes unitários dos checks de qualidade Silver/Gold/DB
 │   └── integration/
+│       ├── test_delta_pipeline.py   # Delta MERGE monotônico e Time Travel (versionAsOf)
 │       ├── test_postgres_loader.py  # Carga idempotente, guarda monotônica e QA no Postgres real
 │       └── test_spark_pipeline.py   # Paridade Pandas vs PySpark e PartitionFilters Parquet
 ├── .github/workflows/ci.yml         # CI: ruff + unit tests + integration (Postgres + Spark)
@@ -86,7 +93,7 @@ proj/
 
 O pipeline opera de ponta a ponta da coleta na API do PNCP até a validação final no PostgreSQL e nas camadas Silver/Gold em Parquet, orquestrado pelo Airflow 3.
 
-### Fluxo do Pipeline (Etapas 1 a 5 ativas)
+### Fluxo do Pipeline (Etapas 1 a 6 ativas)
 ```mermaid
 flowchart TD
     API[API PNCP v1<br/>publicacao / atualizacao] -->|Etapa 1: httpx + tenacity| B[(Camada Bronze<br/>data/raw JSON + metadata)]
@@ -137,23 +144,28 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
     ```
     *Opções:* `--endpoint` (`contratacoes/publicacao` ou `contratacoes/atualizacao`), `--modality` (`6` Pregão Eletrônico, `8` Dispensa, `4` Concorrência, `9` Inexigibilidade), `--uf` e `--max-pages`.
 
-3. **Carregar dados no PostgreSQL e executar consultas analíticas:**
+3. **Carregar dados (PNCP + IBGE) no PostgreSQL e executar consultas analíticas:**
     ```powershell
+    python -m pncp_pipeline.ingestion.ibge_client
     python -m pncp_pipeline.database load
+    python -m pncp_pipeline.database load-ibge
     python -m pncp_pipeline.database query sql/01_gastos_por_uf_e_modalidade.sql
     python -m pncp_pipeline.database query sql/02_deduplicacao_snapshot.sql
     python -m pncp_pipeline.database query sql/03_ranking_orgaos_e_variacao.sql
+    python -m pncp_pipeline.database query sql/04_gasto_per_capita_municipio.sql
     ```
 
-4. **Executar transformações Bronze → Silver → Gold (Parquet) e inspecionar *partition pruning*:**
+4. **Executar transformações Bronze → Silver → Gold (Parquet e Delta Lake):**
     ```powershell
     # Baseline Pandas local (Windows/Linux)
     python -m pncp_pipeline.transformations pandas
 
-    # Pipeline PySpark em container Linux (recomendado no Windows)
-    docker-compose --profile spark build
+    # Pipeline PySpark + Delta Lake em container Linux
+    docker-compose --profile spark build spark
     docker-compose --profile spark run --rm spark python -m pncp_pipeline.transformations spark
     docker-compose --profile spark run --rm spark python -m pncp_pipeline.transformations inspect --uf SP
+    docker-compose --profile spark run --rm spark python -m pncp_pipeline.transformations delta
+    docker-compose --profile spark run --rm spark python -m pncp_pipeline.transformations delta-history
     ```
 
 5. **Rodar checks de qualidade, lint e testes:**
@@ -164,7 +176,7 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
     docker-compose --profile spark run --rm spark pytest -v
     ```
 
-*Validação real executada até a Etapa 4: duas execuções completas da DAG `pncp_contratacoes_pipeline` no Airflow 3 (`scheduled__2026-11-23T00:00:00+00:00` e `manual__2026-11-23T13:19:37.864438+00:00`) concluídas com `success` em todas as tarefas (`ingest_modality`, `transform_silver_gold`, `load_postgres`, `data_quality_checks`), totalizando `616` contratações únicas em `fact_contratacao`.*
+*Validação real executada até a Etapa 6: Airflow 3 (`2` DAG runs com `success`), `616` contratações únicas em `fact_contratacao`, `5.571` municípios do IBGE em `dim_municipio_populacao`, tabela Silver/Gold em Delta Lake (`delta_jobs.py` com `MERGE` e `versionAsOf`) e `42` testes passando no container `spark` + integração PostgreSQL real.*
 
 ## 7. Motivação e Escolhas Arquiteturais (Trade-offs)
 
@@ -175,4 +187,5 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
 
 ## 8. Próximos Passos (Backlog Futuro)
 
-* **Etapa 6 (Delta Lake e Databricks):** Adotar `MERGE` e *time travel* no Delta Lake local, publicar notebook Gold no Databricks Free Edition e enriquecer municípios com IBGE/BCB.
+* **Execução no Databricks Free Edition:** Subir o Parquet Silver para um Unity Catalog Volume e executar [databricks/pncp_gold_delta.ipynb](databricks/pncp_gold_delta.ipynb) seguindo [docs/databricks_e_cloud.md](docs/databricks_e_cloud.md).
+* **Evoluções Opcionais:** Enriquecimento temporal com PTAX/Selic (BCB) e painel analítico (Metabase / Superset) sobre o PostgreSQL.
