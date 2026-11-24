@@ -1,5 +1,7 @@
 # PNCP Data Pipeline
 
+[![CI](https://github.com/Victor-Vaglieri/PNCP-Data-Pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Victor-Vaglieri/PNCP-Data-Pipeline/actions/workflows/ci.yml)
+
 **PNCP Data Pipeline** é um pipeline de Engenharia de Dados ponta a ponta voltado para a coleta, padronização, deduplicação e análise de contratações públicas brasileiras a partir da API oficial do **Portal Nacional de Contratações Públicas (PNCP)**. O projeto evolui de forma incremental até a arquitetura Medallion completa (Bronze, Silver e Gold), banco analítico em PostgreSQL, orquestração no Apache Airflow e processamento em Parquet / Delta Lake.
 
 A solução prioriza código testável, idempotência nas reexecuções, preservação integral dos dados brutos para auditoria e execução local reproduzível via Docker.
@@ -189,3 +191,95 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
 
 * **Execução no Databricks Free Edition:** Subir o Parquet Silver para um Unity Catalog Volume e executar [databricks/pncp_gold_delta.ipynb](databricks/pncp_gold_delta.ipynb) seguindo [docs/databricks_e_cloud.md](docs/databricks_e_cloud.md).
 * **Evoluções Opcionais:** Enriquecimento temporal com PTAX/Selic (BCB) e painel analítico (Metabase / Superset) sobre o PostgreSQL.
+
+## 9. Evidências de Execução (Saídas Reais)
+
+Registros reais capturados após a execução completa do pipeline em ambiente local (Docker + PostgreSQL 16 + Airflow 3.1.6 + PySpark 3.5 + Delta Lake 3.3):
+
+<details>
+<summary><strong>1. Airflow 3 — Duas DAG runs concluídas com <code>success</code> em todas as tarefas</strong></summary>
+
+```text
+dag_id                     | run_id                                   | state   | start_date                       | end_date
+===========================+==========================================+=========+==================================+==================================
+pncp_contratacoes_pipeline | manual__2026-11-23T13:19:37.864438+00:00 | success | 2026-11-23T13:23:41.753898+00:00 | 2026-11-23T13:24:31.796248+00:00
+pncp_contratacoes_pipeline | scheduled__2026-11-23T00:00:00+00:00     | success | 2026-11-23T13:18:47.586115+00:00 | 2026-11-23T13:23:40.716058+00:00
+```
+
+Estados das tarefas na execução `manual__2026-11-23T13:19:37.864438+00:00` (Dynamic Task Mapping nas modalidades `6` e `8`):
+
+```text
+task_id                | state   | map_index
+=======================+=========+==========
+resolve_window         | success |
+list_ingestion_targets | success |
+ingest_modality        | success | 0
+ingest_modality        | success | 1
+transform_silver_gold  | success |
+load_postgres          | success |
+data_quality_checks    | success |
+```
+
+</details>
+
+<details>
+<summary><strong>2. Parquet — Consolidação de partições e <em>Partition Pruning</em> no plano físico do Spark</strong></summary>
+
+```text
+Arquivos Parquet em /app/data/processed/contratacoes: 19
+Total registros para uf_sigla='SP': 17
+== Physical Plan ==
+* ColumnarToRow (2)
++- Scan parquet  (1)
+
+(1) Scan parquet
+Location: InMemoryFileIndex [file:/app/data/processed/contratacoes]
+PartitionFilters: [isnotnull(uf_sigla#28), (uf_sigla#28 = SP)]
+```
+
+</details>
+
+<details>
+<summary><strong>3. Delta Lake — <code>WRITE</code> inicial (v0) e <code>MERGE</code> idempotente (v1)</strong></summary>
+
+```text
+{"timestamp": "2026-11-24T13:29:16.434015+00:00", "level": "INFO", "logger": "__main__", "message": "delta_pipeline_concluido", "files": 13, "rows_in": 616, "rows_silver_batch": 616, "total_silver_delta": 616, "gold_rows": 78, "delta_version": 1}
+
+v1 | 2026-11-24 13:29:09.718000 | MERGE | {'numOutputRows': '616', 'numTargetRowsInserted': '0', 'numTargetRowsUpdated': '616', ...}
+v0 | 2026-11-24 13:26:57.029000 | WRITE | {'numOutputRows': '616', 'numOutputBytes': '620251', 'numFiles': '51'}
+```
+
+</details>
+
+<details>
+<summary><strong>4. PostgreSQL + IBGE — Cruzamento per capita (<code>5.571</code> municípios) e Quality Gate JSON</strong></summary>
+
+```text
+codigo_ibge | municipio_nome     | uf_sigla | ano_populacao | populacao | qtd_contratacoes | total_estimado | total_homologado | gasto_estimado_per_capita | gasto_homologado_per_capita
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+4200903     | Angelina           | SC       | 2026          | 5489      | 1                | 4197821.00     | 0.00             | 764.77                    | 0.00
+4101853     | Ariranha do Ivaí   | PR       | 2026          | 2346      | 1                | 1740000.00     | 0.00             | 741.69                    | 0.00
+3127370     | Goiabeira          | MG       | 2026          | 2849      | 1                | 1991379.20     | 0.00             | 698.97                    | 0.00
+3153707     | Quartel Geral      | MG       | 2026          | 3227      | 1                | 1553461.80     | 1503700.00       | 481.40                    | 465.97
+2313005     | Solonópole         | CE       | 2026          | 18831     | 1                | 9015254.48     | 0.00             | 478.75                    | 0.00
+```
+
+Check automatizado (`python -m pncp_pipeline.common.quality`):
+
+```json
+{"timestamp": "2026-11-24T12:57:49.396953+00:00", "level": "INFO", "logger": "__main__", "message": "quality_checks_passed", "silver_rows": 616, "gold_rows": 616, "fact_rows": 616, "duplicate_keys": 0, "null_required_fields": 0, "negative_values": 0}
+```
+
+</details>
+
+<details>
+<summary><strong>5. Suíte de Testes (Lint, Unitários e Integração)</strong></summary>
+
+```text
+ruff check --no-cache src dags tests                                -> All checks passed!
+pytest -q -p no:cacheprovider tests/unit                            -> 40 passed in 4.22s
+pytest -q -p no:cacheprovider tests/integration/test_postgres_loader.py -> 1 passed in 1.99s
+docker-compose --profile spark run --rm spark pytest ... (42 testes) -> 42 passed in 31.77s
+```
+
+</details>
