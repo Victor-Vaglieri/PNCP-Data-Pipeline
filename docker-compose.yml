@@ -3,34 +3,161 @@ x-airflow-common: &airflow-common
   build:
     context: .
     dockerfile: Dockerfile.airflow
+  security_opt:
+    - no-new-privileges:true
   environment: &airflow-env
+    PYTHONDONTWRITEBYTECODE: "1"
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
-    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-dev-local-jwt-secret-key-at-least-32-bytes}
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: ${AIRFLOW_SIMPLE_AUTH_ALL_ADMINS:-False}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?Defina AIRFLOW_JWT_SECRET (minimo 32 bytes) no arquivo .env}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-pncp}:${POSTGRES_PASSWORD:-pncp}@postgres:5432/airflow
+    POSTGRES_USER: ${POSTGRES_USER:-pncp}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env}
+    POSTGRES_DB: ${POSTGRES_DB:-pncp}
     RAW_DATA_DIR: /opt/airflow/data/raw
     SILVER_DATA_DIR: /opt/airflow/data/processed
     GOLD_DATA_DIR: /opt/airflow/data/gold
-    DATABASE_URL: postgresql://${POSTGRES_USER:-pncp}:${POSTGRES_PASSWORD:-pncp}@postgres:5432/${POSTGRES_DB:-pncp}
     SPARK_LOCAL_IP: 127.0.0.1
+  entrypoint:
+    - /bin/bash
+    - -c
+    - |
+      set -euo pipefail
+      eval "$$(python - <<'PY_DB_URI'
+      import os
+      import shlex
+      from urllib.parse import quote
+
+      user = quote(os.environ.get("POSTGRES_USER", "pncp"), safe="")
+      pwd = quote(os.environ["POSTGRES_PASSWORD"], safe="")
+      db = quote(os.environ.get("POSTGRES_DB", "pncp"), safe="")
+      sql_conn = f"postgresql+psycopg2://{user}:{pwd}@postgres:5432/airflow"
+      db_url = f"postgresql://{user}:{pwd}@postgres:5432/{db}"
+      print(f"export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={shlex.quote(sql_conn)}")
+      print(f"export DATABASE_URL={shlex.quote(db_url)}")
+      PY_DB_URI
+      )"
+      exec /entrypoint "$$@"
+    - --
   volumes:
-    - ./dags:/opt/airflow/dags
+    - ./dags:/opt/airflow/dags:ro
     - ./data:/opt/airflow/data
-    - ./src:/opt/airflow/src
+    - ./src:/opt/airflow/src:ro
     - airflow_logs:/opt/airflow/logs
 
 services:
+  config-check:
+    <<: *airflow-common
+    container_name: pncp-config-check
+    environment:
+      <<: *airflow-env
+      PNCP_DEPLOY_MODE: ${PNCP_DEPLOY_MODE:-local}
+      POSTGRES_BIND_HOST: ${POSTGRES_BIND_HOST:-127.0.0.1}
+      AIRFLOW_BIND_HOST: ${AIRFLOW_BIND_HOST:-127.0.0.1}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env (veja .env.example)}
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        python - <<'PY_SECURITY'
+        import base64
+        import os
+        import sys
+
+        mode = os.environ.get("PNCP_DEPLOY_MODE", "local").strip().lower()
+        if mode not in {"local", "shared"}:
+            sys.exit(f"PNCP_DEPLOY_MODE invalido: {mode!r} (use 'local' ou 'shared')")
+
+        loopback = {"127.0.0.1", "localhost", "::1"}
+        pg_bind = os.environ.get("POSTGRES_BIND_HOST", "127.0.0.1").strip()
+        af_bind = os.environ.get("AIRFLOW_BIND_HOST", "127.0.0.1").strip()
+        exposed = (pg_bind not in loopback) or (af_bind not in loopback)
+        strict = (mode == "shared") or exposed
+
+        pg_pass = os.environ.get("POSTGRES_PASSWORD", "")
+        jwt_secret = os.environ.get("AIRFLOW__API_AUTH__JWT_SECRET", "")
+        fernet_key = os.environ.get("AIRFLOW__CORE__FERNET_KEY", "").strip()
+        raw_all_admins = os.environ.get(
+            "AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS", "False"
+        ).strip().lower()
+
+        weak_tokens = (
+            "pncp",
+            "postgres",
+            "password",
+            "admin",
+            "changeme",
+            "change-me",
+            "dev-local",
+        )
+        errors: list[str] = []
+
+        if raw_all_admins not in {"false", "true"}:
+            errors.append(
+                f"AIRFLOW_SIMPLE_AUTH_ALL_ADMINS invalido: {raw_all_admins!r} "
+                "(use estritamente 'False' ou 'True')"
+            )
+        all_admins = raw_all_admins != "false"
+
+        if not pg_pass:
+            errors.append("POSTGRES_PASSWORD ausente")
+        if len(jwt_secret.encode("utf-8")) < 32:
+            errors.append("AIRFLOW_JWT_SECRET deve ter pelo menos 32 bytes")
+
+        if strict:
+            if len(pg_pass) < 12 or any(tok in pg_pass.lower() for tok in weak_tokens):
+                errors.append(
+                    "POSTGRES_PASSWORD fraco/padrao nao permitido em modo compartilhado ou exposto"
+                )
+            if any(tok in jwt_secret.lower() for tok in weak_tokens):
+                errors.append(
+                    "AIRFLOW_JWT_SECRET padrao/exemplo nao permitido em modo compartilhado ou exposto"
+                )
+            if all_admins:
+                errors.append(
+                    "AIRFLOW_SIMPLE_AUTH_ALL_ADMINS=True e proibido em modo compartilhado ou exposto"
+                )
+            if not fernet_key or any(tok in fernet_key.lower() for tok in weak_tokens):
+                errors.append(
+                    "AIRFLOW_FERNET_KEY obrigatorio e valido em modo compartilhado ou exposto"
+                )
+            else:
+                try:
+                    decoded = base64.b64decode(
+                        fernet_key.encode("ascii"), altchars=b"-_", validate=True
+                    )
+                    if len(decoded) != 32 or not any(decoded):
+                        errors.append(
+                            "AIRFLOW_FERNET_KEY deve decodificar para 32 bytes nao-nulos (chave Fernet)"
+                        )
+                except Exception:
+                    errors.append(
+                        "AIRFLOW_FERNET_KEY invalido (esperado base64 urlsafe de 32 bytes)"
+                    )
+
+        if errors:
+            for err in errors:
+                print(f"[SECURITY ERROR] {err}", file=sys.stderr)
+            sys.exit(1)
+        PY_SECURITY
+
   postgres:
     image: postgres:16-alpine
     container_name: pncp-postgres
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      config-check:
+        condition: service_completed_successfully
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-pncp}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pncp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no arquivo .env (veja .env.example)}
       POSTGRES_DB: ${POSTGRES_DB:-pncp}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/postgres_init.sql:/docker-entrypoint-initdb.d/00_airflow_db.sql:ro
@@ -45,26 +172,43 @@ services:
     <<: *airflow-common
     container_name: pncp-airflow-init
     depends_on:
+      config-check:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     entrypoint: /bin/bash
     command:
       - -c
       - |
+        set -euo pipefail
+        eval "$$(python - <<'PY_DB_URI'
+        import os
+        import shlex
+        from urllib.parse import quote
+
+        user = quote(os.environ.get("POSTGRES_USER", "pncp"), safe="")
+        pwd = quote(os.environ["POSTGRES_PASSWORD"], safe="")
+        db = quote(os.environ.get("POSTGRES_DB", "pncp"), safe="")
+        sql_conn = f"postgresql+psycopg2://{user}:{pwd}@postgres:5432/airflow"
+        db_url = f"postgresql://{user}:{pwd}@postgres:5432/{db}"
+        print(f"export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN={shlex.quote(sql_conn)}")
+        print(f"export DATABASE_URL={shlex.quote(db_url)}")
+        PY_DB_URI
+        )"
         python -c "import os, psycopg; conn=psycopg.connect(os.environ['DATABASE_URL'], autocommit=True); exists=conn.execute(\"SELECT 1 FROM pg_database WHERE datname='airflow'\").fetchone(); exists or conn.execute('CREATE DATABASE airflow')"
         airflow db migrate
 
   airflow-api-server:
     <<: *airflow-common
     container_name: pncp-airflow-api
-    command: api-server
+    command: ["api-server"]
     ports:
-      - "${AIRFLOW_PORT:-8080}:8080"
+      - "${AIRFLOW_BIND_HOST:-127.0.0.1}:${AIRFLOW_PORT:-8080}:8080"
     depends_on:
       airflow-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v2/version')\""]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v2/monitor/health')\""]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -72,7 +216,7 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     container_name: pncp-airflow-scheduler
-    command: scheduler
+    command: ["scheduler"]
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -82,7 +226,7 @@ services:
   airflow-dag-processor:
     <<: *airflow-common
     container_name: pncp-airflow-dag-processor
-    command: dag-processor
+    command: ["dag-processor"]
     depends_on:
       airflow-init:
         condition: service_completed_successfully
@@ -93,6 +237,8 @@ services:
       dockerfile: Dockerfile
     container_name: pncp-spark
     user: "50000:0"
+    security_opt:
+      - no-new-privileges:true
     profiles: ["spark"]
     environment:
       RAW_DATA_DIR: /app/data/raw
@@ -102,8 +248,8 @@ services:
       SPARK_LOCAL_IP: 127.0.0.1
     volumes:
       - ./data:/app/data
-      - ./src:/app/src
-      - ./tests:/app/tests
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
     command: ["python", "-m", "pncp_pipeline.transformations", "spark"]
 
 volumes:

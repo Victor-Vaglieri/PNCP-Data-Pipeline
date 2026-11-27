@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
+import shutil
+from collections.abc import Sequence
 from contextlib import redirect_stdout
+from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
@@ -17,6 +22,12 @@ from pyspark.sql.types import (
     StructType,
 )
 
+from pncp_pipeline.ingestion.bronze_checkpoint import (
+    discover_bronze_files,
+    fingerprint_bronze_files,
+    full_refresh_from_env,
+    locked_bronze_checkpoint,
+)
 from pncp_pipeline.transformations.pandas_baseline import TransformSummary
 
 ORGAO_SCHEMA = StructType(
@@ -107,17 +118,21 @@ def _norm_str(col: F.Column, *, upper: bool = False) -> F.Column:
     return F.upper(null_if_blank) if upper else null_if_blank
 
 
-def read_bronze_spark(spark: SparkSession, raw_dir: Path) -> tuple[int, DataFrame]:
-    scan_dir = raw_dir / "source=pncp" if (raw_dir / "source=pncp").exists() else raw_dir
-    files = sorted(scan_dir.rglob("*.json"))
-    if not files:
+def read_bronze_spark(
+    spark: SparkSession,
+    raw_dir: Path,
+    *,
+    files: Sequence[Path] | None = None,
+) -> tuple[int, DataFrame]:
+    selected = list(files) if files is not None else discover_bronze_files(raw_dir)
+    if not selected:
         empty = spark.createDataFrame([], BRONZE_ENVELOPE_SCHEMA)
         return 0, empty
 
     raw = (
         spark.read.option("multiLine", "true")
         .schema(BRONZE_ENVELOPE_SCHEMA)
-        .json([str(f) for f in files])
+        .json([str(f) for f in selected])
         .withColumn("source_file", F.input_file_name())
     )
     exploded = raw.select(
@@ -157,7 +172,19 @@ def read_bronze_spark(spark: SparkSession, raw_dir: Path) -> tuple[int, DataFram
         F.col("run_id"),
         F.col("source_file"),
     )
-    return len(files), flat
+    return len(selected), flat
+
+
+def _deduplicate_silver_spark(df: DataFrame) -> DataFrame:
+    dedup_window = Window.partitionBy("numero_controle_pncp").orderBy(
+        F.col("data_atualizacao").desc_nulls_last(),
+        F.col("ingested_at").desc_nulls_last(),
+    )
+    return (
+        df.withColumn("_rn", F.row_number().over(dedup_window))
+        .filter(F.col("_rn") == 1)
+        .drop("_rn")
+    )
 
 
 def transform_silver_spark(flat_df: DataFrame) -> tuple[DataFrame, DataFrame]:
@@ -188,15 +215,7 @@ def transform_silver_spark(flat_df: DataFrame) -> tuple[DataFrame, DataFrame]:
     rejected = tagged.filter(F.col("rejection_reason").isNotNull())
     valid_raw = tagged.filter(F.col("rejection_reason").isNull()).drop("rejection_reason")
 
-    dedup_window = Window.partitionBy("numero_controle_pncp").orderBy(
-        F.col("data_atualizacao").desc_nulls_last(),
-        F.col("ingested_at").desc_nulls_last(),
-    )
-    deduped = (
-        valid_raw.withColumn("_rn", F.row_number().over(dedup_window))
-        .filter(F.col("_rn") == 1)
-        .drop("_rn")
-    )
+    deduped = _deduplicate_silver_spark(valid_raw)
 
     silver = (
         deduped.withColumn("pub_year", F.year("data_publicacao_pncp").cast("int"))
@@ -261,65 +280,215 @@ def build_gold_ranking_orgaos_spark(silver_df: DataFrame) -> DataFrame:
     return agg.withColumn("rank_uf", F.dense_rank().over(rank_win))
 
 
+@dataclass
+class _DirSwapRecord:
+    target: Path
+    backup: Path | None = None
+    staging: Path | None = None
+    staging_moved: bool = False
+
+
+def _commit_dir_changes(
+    replacements: Sequence[tuple[Path, Path]],
+    removals: Sequence[Path] = (),
+) -> None:
+    """Troca e/ou remove múltiplos diretórios com rollback coletivo em caso de falha."""
+    records: list[_DirSwapRecord] = []
+    try:
+        for staging, target in replacements:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            rec = _DirSwapRecord(target=target, staging=staging)
+            if target.exists():
+                backup = target.parent / f".bak_{target.name}_{uuid4().hex[:8]}"
+                os.replace(target, backup)
+                rec.backup = backup
+            records.append(rec)
+            os.replace(staging, target)
+            rec.staging_moved = True
+
+        for target in removals:
+            if target.exists():
+                backup = target.parent / f".bak_{target.name}_{uuid4().hex[:8]}"
+                os.replace(target, backup)
+                records.append(_DirSwapRecord(target=target, backup=backup))
+    except BaseException:
+        for rec in reversed(records):
+            if rec.staging_moved and rec.staging is not None and rec.target.exists():
+                try:
+                    os.replace(rec.target, rec.staging)
+                except OSError:
+                    shutil.rmtree(rec.target, ignore_errors=True)
+            if rec.backup is not None and rec.backup.exists() and not rec.target.exists():
+                os.replace(rec.backup, rec.target)
+        raise
+    else:
+        for rec in records:
+            if rec.backup is not None and rec.backup.exists():
+                shutil.rmtree(rec.backup, ignore_errors=True)
+
+
+def _swap_dir(staging: Path, target: Path) -> None:
+    _commit_dir_changes([(staging, target)])
+
+
+def _merge_rejected_spark(
+    existing_rejected: DataFrame, batch_rejected_df: DataFrame
+) -> DataFrame:
+    """Mescla rejeitados substituindo apenas os source_file do lote, preservando NULLs."""
+    batch_sources = batch_rejected_df.select("source_file").distinct()
+    kept_existing = existing_rejected.join(batch_sources, on="source_file", how="left_anti")
+    return kept_existing.unionByName(batch_rejected_df, allowMissingColumns=True)
+
+
 def run_spark_pipeline(
-    spark: SparkSession, raw_dir: Path, silver_dir: Path, gold_dir: Path
+    spark: SparkSession,
+    raw_dir: Path,
+    silver_dir: Path,
+    gold_dir: Path,
+    *,
+    incremental: bool = True,
+    full_refresh: bool | None = None,
+    checkpoint_path: Path | None = None,
 ) -> TransformSummary:
-    files_read, flat_df = read_bronze_spark(spark, raw_dir)
-    if files_read == 0:
-        return TransformSummary(
-            engine="pyspark",
-            files_read=0,
-            rows_in=0,
-            rows_valid_dedup=0,
-            rows_rejected=0,
-            gold_uf_rows=0,
-            silver_path=silver_dir / "contratacoes",
-            gold_path=gold_dir / "resumo_uf_mes",
-        )
-
-    rows_in = flat_df.count()
-    silver_df, rejected_df = transform_silver_spark(flat_df)
-    silver_df.cache()
-
+    effective_full_refresh = full_refresh_from_env(full_refresh)
+    clear_empty_outputs = effective_full_refresh or not incremental
     silver_contratacoes = silver_dir / "contratacoes"
     silver_rejected = silver_dir / "rejected" / "contratacoes"
     gold_uf_path = gold_dir / "resumo_uf_mes"
     gold_orgaos_path = gold_dir / "ranking_orgaos"
+    ckpt = checkpoint_path or (silver_dir / "_checkpoints" / "bronze_to_silver.json")
+    run_id = uuid4().hex[:12]
 
-    rows_valid = silver_df.count()
-    rows_rejected = rejected_df.count()
+    # Calcula SHA-256 fora da seção crítica do lock exclusivo
+    precomputed = fingerprint_bronze_files(raw_dir)
 
-    if rows_valid > 0:
-        (
-            silver_df.repartition("pub_year", "pub_month", "uf_sigla")
-            .write.mode("overwrite")
-            .partitionBy("pub_year", "pub_month", "uf_sigla")
-            .parquet(str(silver_contratacoes))
+    with locked_bronze_checkpoint(ckpt, consumer="spark_silver_gold") as session:
+        pending = session.pending(
+            raw_dir,
+            full_refresh=clear_empty_outputs,
+            precomputed=precomputed,
         )
-        gold_uf_df = build_gold_uf_mes_spark(silver_df)
-        gold_uf_rows = gold_uf_df.count()
-        gold_uf_df.coalesce(1).write.mode("overwrite").parquet(str(gold_uf_path))
-        build_gold_ranking_orgaos_spark(silver_df).coalesce(1).write.mode("overwrite").parquet(
-            str(gold_orgaos_path)
+        if not pending:
+            if clear_empty_outputs:
+                _commit_dir_changes(
+                    [],
+                    removals=[
+                        silver_contratacoes,
+                        silver_rejected,
+                        gold_uf_path,
+                        gold_orgaos_path,
+                    ],
+                )
+                if incremental:
+                    session.commit([], run_id=run_id, replace_all=True)
+            return TransformSummary(
+                engine="pyspark",
+                files_read=0,
+                rows_in=0,
+                rows_valid_dedup=0,
+                rows_rejected=0,
+                gold_uf_rows=0,
+                silver_path=silver_contratacoes,
+                gold_path=gold_uf_path,
+            )
+
+        files_read, flat_df = read_bronze_spark(spark, raw_dir, files=[fp.path for fp in pending])
+        rows_in = flat_df.count()
+        batch_silver_df, batch_rejected_df = transform_silver_spark(flat_df)
+
+        has_existing_silver = (
+            incremental
+            and not effective_full_refresh
+            and silver_contratacoes.exists()
+            and any(silver_contratacoes.rglob("*.parquet"))
         )
-    else:
-        gold_uf_rows = 0
+        batch_valid_count = batch_silver_df.count()
+        if batch_valid_count > 0 and has_existing_silver:
+            existing_silver_df = spark.read.parquet(str(silver_contratacoes))
+            silver_df = _deduplicate_silver_spark(
+                existing_silver_df.unionByName(batch_silver_df, allowMissingColumns=True)
+            )
+        else:
+            silver_df = batch_silver_df
 
-    if rows_rejected > 0:
-        rejected_df.coalesce(1).write.mode("overwrite").parquet(str(silver_rejected))
+        silver_df.cache()
+        silver_cached = True
+        rows_valid = silver_df.count()
+        rows_rejected = batch_rejected_df.count()
 
-    silver_df.unpersist()
+        staging_dirs: list[tuple[Path, Path]] = []
+        removal_dirs: list[Path] = []
+        try:
+            if rows_valid > 0:
+                staging_silver = silver_dir / f".tmp_contratacoes_{uuid4().hex[:8]}"
+                (
+                    silver_df.repartition("pub_year", "pub_month", "uf_sigla")
+                    .write.mode("overwrite")
+                    .partitionBy("pub_year", "pub_month", "uf_sigla")
+                    .parquet(str(staging_silver))
+                )
+                staging_dirs.append((staging_silver, silver_contratacoes))
 
-    return TransformSummary(
-        engine="pyspark",
-        files_read=files_read,
-        rows_in=rows_in,
-        rows_valid_dedup=rows_valid,
-        rows_rejected=rows_rejected,
-        gold_uf_rows=gold_uf_rows,
-        silver_path=silver_contratacoes,
-        gold_path=gold_uf_path,
-    )
+                gold_uf_df = build_gold_uf_mes_spark(silver_df)
+                gold_uf_rows = gold_uf_df.count()
+                staging_gold_uf = gold_dir / f".tmp_resumo_uf_mes_{uuid4().hex[:8]}"
+                gold_uf_df.coalesce(1).write.mode("overwrite").parquet(str(staging_gold_uf))
+                staging_dirs.append((staging_gold_uf, gold_uf_path))
+
+                staging_gold_orgaos = gold_dir / f".tmp_ranking_orgaos_{uuid4().hex[:8]}"
+                build_gold_ranking_orgaos_spark(silver_df).coalesce(1).write.mode(
+                    "overwrite"
+                ).parquet(str(staging_gold_orgaos))
+                staging_dirs.append((staging_gold_orgaos, gold_orgaos_path))
+            else:
+                gold_uf_rows = 0
+                if clear_empty_outputs:
+                    removal_dirs.extend([silver_contratacoes, gold_uf_path, gold_orgaos_path])
+
+            if rows_rejected > 0:
+                rejected_to_write = batch_rejected_df
+                if (
+                    incremental
+                    and not effective_full_refresh
+                    and silver_rejected.exists()
+                    and any(silver_rejected.rglob("*.parquet"))
+                ):
+                    existing_rejected = spark.read.parquet(str(silver_rejected))
+                    rejected_to_write = _merge_rejected_spark(
+                        existing_rejected, batch_rejected_df
+                    )
+                staging_rejected = silver_rejected.parent / f".tmp_contratacoes_{uuid4().hex[:8]}"
+                rejected_to_write.coalesce(1).write.mode("overwrite").parquet(
+                    str(staging_rejected)
+                )
+                staging_dirs.append((staging_rejected, silver_rejected))
+            elif clear_empty_outputs:
+                removal_dirs.append(silver_rejected)
+
+            silver_df.unpersist()
+            silver_cached = False
+
+            _commit_dir_changes(staging_dirs, removals=removal_dirs)
+            staging_dirs.clear()
+        finally:
+            if silver_cached:
+                silver_df.unpersist()
+            for staging, _ in staging_dirs:
+                shutil.rmtree(staging, ignore_errors=True)
+
+        if incremental:
+            session.commit(pending, run_id=run_id, replace_all=effective_full_refresh)
+
+        return TransformSummary(
+            engine="pyspark",
+            files_read=files_read,
+            rows_in=rows_in,
+            rows_valid_dedup=rows_valid,
+            rows_rejected=rows_rejected,
+            gold_uf_rows=gold_uf_rows,
+            silver_path=silver_contratacoes,
+            gold_path=gold_uf_path,
+        )
 
 
 def inspect_parquet_pruning(spark: SparkSession, silver_dir: Path, uf: str = "SP") -> str:

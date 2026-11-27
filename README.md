@@ -119,9 +119,10 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
 * `PNCP_MAX_RETRIES`: Máximo de tentativas em erros transitórios (padrão: `5`).
 * `PNCP_USER_AGENT`: Identificação enviada no header `User-Agent`.
 * `RAW_DATA_DIR`, `SILVER_DATA_DIR`, `GOLD_DATA_DIR`: Diretórios locais das camadas Bronze, Silver e Gold (`data/raw`, `data/processed`, `data/gold`).
-* `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`: Credenciais e porta do container PostgreSQL no `docker-compose.yml`.
-* `DATABASE_URL`: String de conexão usada pelo loader e consultas (padrão: `postgresql://pncp:pncp@localhost:5432/pncp`).
-* `AIRFLOW_PORT`, `AIRFLOW_JWT_SECRET`: Porta da UI do Airflow (`8080`) e segredo JWT compartilhado entre `api-server`, `scheduler` e `dag-processor`.
+* `PNCP_DEPLOY_MODE`, `POSTGRES_BIND_HOST`, `AIRFLOW_BIND_HOST`: Controle de modo (`local` ou `shared`) e interface de bind (padrão seguro `127.0.0.1` — nunca expõe portas na rede sem opt-in).
+* `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`: Credenciais e porta do container PostgreSQL no `docker-compose.yml` (`POSTGRES_PASSWORD` é obrigatório via `.env`, sem fallback embutido no Compose).
+* `DATABASE_URL`: String de conexão usada pelo loader e consultas (alinhada ao `.env`).
+* `AIRFLOW_PORT`, `AIRFLOW_SIMPLE_AUTH_ALL_ADMINS`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_FERNET_KEY`: Porta da UI (`8080`), autenticação ativa por padrão (`AIRFLOW_SIMPLE_AUTH_ALL_ADMINS=False`), segredo JWT obrigatório (>= 32 bytes) e chave Fernet obrigatória em modo `shared` ou exposto.
 * `LOG_LEVEL`, `LOG_FORMAT`: Nível (`INFO`) e formato de logs (`json` ou `text`).
 
 ### Passo a Passo
@@ -132,9 +133,11 @@ Todas as configurações da ingestão são controladas por variáveis de ambient
     .\.venv\Scripts\Activate.ps1
     pip install -e ".[dev]"
     Copy-Item .env.example .env
-    docker-compose up -d --build --wait
+    docker compose up -d --build --wait
     ```
-    Acesse a UI do Airflow em `http://localhost:8080` (`SimpleAuthManager` em modo local admin) e dispare a DAG `pncp_contratacoes_pipeline`, ou use a CLI no container:
+    > **Segurança do Docker Compose:** Por padrão, `postgres` e `airflow-api-server` escutam apenas em `127.0.0.1`, a autenticação do Airflow fica ativa (`AIRFLOW_SIMPLE_AUTH_ALL_ADMINS=False`) e o `docker-compose.yml` exige `POSTGRES_PASSWORD` e `AIRFLOW_JWT_SECRET` definidos no `.env`. O serviço pré-flight `config-check` valida todas as regras **antes** do `postgres` iniciar ou expor portas, bloqueando modo compartilhado (`PNCP_DEPLOY_MODE=shared`) ou bind fora de `127.0.0.1` quando houver senhas fracas/exemplo, `AIRFLOW_FERNET_KEY` ausente/inválida ou `AIRFLOW_SIMPLE_AUTH_ALL_ADMINS` diferente de `False`. As URIs de conexão (`DATABASE_URL` e `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`) aplicam URL-encoding seguro em `POSTGRES_PASSWORD`.
+
+    Acesse a UI do Airflow em `http://127.0.0.1:8080` (use a senha gerada do `SimpleAuthManager` nos logs de `pncp-airflow-api`, ou defina `AIRFLOW_SIMPLE_AUTH_ALL_ADMINS=True` apenas para conveniência estritamente local em `127.0.0.1`) e dispare a DAG `pncp_contratacoes_pipeline`, ou use a CLI no container:
     ```powershell
     docker exec pncp-airflow-scheduler airflow dags unpause pncp_contratacoes_pipeline
     docker exec pncp-airflow-scheduler airflow dags list-runs pncp_contratacoes_pipeline

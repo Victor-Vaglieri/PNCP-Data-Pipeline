@@ -3,9 +3,26 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 PNCP_MIN_PAGE_SIZE = 10  # limites documentados no OpenAPI do PNCP (tamanhoPagina)
 PNCP_MAX_PAGE_SIZE = 50
+
+
+def build_database_url(
+    *,
+    user: str = "pncp",
+    password: str = "pncp",
+    host: str = "localhost",
+    port: int | str = 5432,
+    database: str = "pncp",
+    scheme: str = "postgresql",
+) -> str:
+    """Monta URI PostgreSQL com URL-encoding seguro para usuário, senha e banco."""
+    return (
+        f"{scheme}://{quote(user, safe='')}:{quote(password, safe='')}"
+        f"@{host}:{port}/{quote(database, safe='')}"
+    )
 
 
 @dataclass(frozen=True)
@@ -38,6 +55,27 @@ class Settings:
     def from_env(cls) -> Settings:
         env = os.environ
         defaults = cls()
+        database_url = env.get("DATABASE_URL")
+        if not database_url:
+            if any(
+                k in env
+                for k in (
+                    "POSTGRES_USER",
+                    "POSTGRES_PASSWORD",
+                    "POSTGRES_HOST",
+                    "POSTGRES_PORT",
+                    "POSTGRES_DB",
+                )
+            ):
+                database_url = build_database_url(
+                    user=env.get("POSTGRES_USER", "pncp"),
+                    password=env.get("POSTGRES_PASSWORD", "pncp"),
+                    host=env.get("POSTGRES_HOST", "localhost"),
+                    port=env.get("POSTGRES_PORT", "5432"),
+                    database=env.get("POSTGRES_DB", "pncp"),
+                )
+            else:
+                database_url = defaults.database_url
         return cls(
             base_url=env.get("PNCP_BASE_URL", defaults.base_url).rstrip("/"),
             page_size=int(env.get("PNCP_PAGE_SIZE", defaults.page_size)),
@@ -49,7 +87,7 @@ class Settings:
             gold_data_dir=Path(env.get("GOLD_DATA_DIR", str(defaults.gold_data_dir))),
             delta_data_dir=Path(env.get("DELTA_DATA_DIR", str(defaults.delta_data_dir))),
             ibge_base_url=env.get("IBGE_BASE_URL", defaults.ibge_base_url).rstrip("/"),
-            database_url=env.get("DATABASE_URL", defaults.database_url),
+            database_url=database_url,
             log_level=env.get("LOG_LEVEL", defaults.log_level),
             log_format=env.get("LOG_FORMAT", defaults.log_format),
         )

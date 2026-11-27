@@ -23,10 +23,9 @@ A tabela fato **`fact_contratacao`** representa a menor granularidade entregue p
 ## 3. Idempotência e Tratamento de Duplicidades
 
 Reexecutar o loader sobre os mesmos arquivos Bronze (ou após nova coleta do mesmo período) não gera linhas duplicadas nem regressão de versão:
-1. Dentro do lote lido do Bronze, `deduplicate_contratacoes` mantém apenas o registro de maior `(data_atualizacao, ingested_at)` para cada `numero_controle_pncp`.
-2. No PostgreSQL, `INSERT ... ON CONFLICT (numero_controle_pncp) DO UPDATE` usa guarda monotônica:
-   ```sql
-   WHERE fact_contratacao.data_atualizacao IS NULL
-      OR EXCLUDED.data_atualizacao >= fact_contratacao.data_atualizacao
-   ```
+1. O loader mantém um checkpoint transacional em `pipeline_runs` (`stage = 'bronze_to_postgres_checkpoint'`) serializado via `pg_advisory_xact_lock`, processando apenas arquivos Bronze novos, modificados ou de backfill (com opção `full_refresh=True` / `PNCP_FULL_REFRESH=1` para reprocessamento total).
+2. Dentro do lote lido do Bronze, `deduplicate_contratacoes` mantém apenas o registro de maior `(data_atualizacao, data_atualizacao_global, ingested_at)` para cada `numero_controle_pncp`.
+3. No PostgreSQL, `INSERT ... ON CONFLICT (numero_controle_pncp) DO UPDATE` atualiza todos os campos mutáveis de `fact_contratacao` sob guarda monotônica por `(data_atualizacao, data_atualizacao_global, ingested_at)`:
+   - Atualiza se `EXCLUDED.data_atualizacao` for mais recente (ou preencher um `NULL` existente);
+   - Em empate de `data_atualizacao`, só atualiza se `data_atualizacao_global` for mais recente ou, empatando ambos, se `EXCLUDED.ingested_at >= fact_contratacao.ingested_at`.
    Se uma reexecução antiga tentar sobrescrever uma versão mais nova já gravada, o `UPDATE` é ignorado.
